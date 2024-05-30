@@ -24,6 +24,7 @@ import torch
 from aitemplate.compiler import compile_model, ops
 from aitemplate.frontend import Tensor
 from aitemplate.testing import detect_target
+from aitemplate.testing.test_utils import filter_test_cases_by_test_env
 from aitemplate.utils import shape_utils
 
 
@@ -37,7 +38,6 @@ def build_causal_attention_mask(bsz, seq_len, dtype):
     return mask
 
 
-@unittest.skipIf(detect_target().name() == "cuda", "Only supported by ROCM.")
 class BMMSoftmaxBMMTestCase(unittest.TestCase):
     def __init__(self, *args, **kwargs):
         super(BMMSoftmaxBMMTestCase, self).__init__(*args, **kwargs)
@@ -83,7 +83,7 @@ class BMMSoftmaxBMMTestCase(unittest.TestCase):
             Y, target, "./tmp", f"bmm_{test_name}_permute", dll_name=dll_name
         )
 
-        for (b, m) in itertools.product(bs, ms):
+        for b, m in itertools.product(bs, ms):
             X_pt = torch.randn(b, m, K).cuda().half()  # Q
             W_pt = torch.randn(b, N, K).cuda().half()  # K
             B1_pt = torch.randn(b, N, D).cuda().half()  # V
@@ -156,7 +156,7 @@ class BMMSoftmaxBMMTestCase(unittest.TestCase):
             Y, target, "./tmp", f"bmm_{test_name}_permute", dll_name=dll_name
         )
 
-        for (b, m) in itertools.product(bs, ms):
+        for b, m in itertools.product(bs, ms):
             X_pt = torch.randn(b, m, K).cuda().half()  # Q
             W_pt = torch.randn(b, N, K).cuda().half()  # K
             B1_pt = torch.randn(b, N, D).cuda().half()  # V
@@ -172,7 +172,7 @@ class BMMSoftmaxBMMTestCase(unittest.TestCase):
             else:
                 self.assertTrue(torch.allclose(Y2_pt, y, atol=1e-1, rtol=1e-1))
 
-    def test_rcr(self):
+    def test_rcr_rocm(self):
         # FIXME: re-enable it after we fix the missing parameter for bmm_softmax_bmm
         # self._test_b2b([16], [576], N=576, K=64, D=64, test_name="static")
         self._test_bmm_permute([24], [256], N=256, K=64, D=64, test_name="static")
@@ -204,6 +204,9 @@ class BMMSoftmaxBMMTestCase(unittest.TestCase):
             test_name="static_copy_op",
             copy_op=True,
         )
+
+
+filter_test_cases_by_test_env(BMMSoftmaxBMMTestCase)
 
 
 if __name__ == "__main__":

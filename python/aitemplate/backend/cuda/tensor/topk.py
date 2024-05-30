@@ -18,17 +18,55 @@ topk kernel codegen for CUDA.
 
 from typing import Any, Dict
 
-from ... import registry
-from ...backend_spec import CUDASpec
-from ...common.tensor import topk_common
+from aitemplate.backend import registry
+from aitemplate.backend.backend_spec import CUDASpec
+from aitemplate.backend.common.tensor import topk_common
 
 # pylint: disable=C0301
 
 header_files = """
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include "cutlass/cutlass.h"
 #include "cutlass/fast_math.h"
 #include <cub/cub.cuh>
+#include <type_traits>
+
+using bfloat16 = nv_bfloat16;
+
+namespace cub {
+
+namespace {
+
+template <typename... Ts>
+using void_t = void;
+
+template <typename T, typename = void>
+struct is_defined : std::false_type {};
+
+// We rely on the fact that defined classes can be instantiated, and the size
+// of their instance can be calculated. Therefore, if sizeof() fails, then
+// SFINAE will fall back to previous option (i.e. std::false_type).
+template <typename T>
+struct is_defined<T, void_t<decltype(sizeof(T))>> : std::true_type {};
+
+}  // namespace
+
+struct ThrowAwayType {}; // don't care about this template type
+
+// A forward declaration is needed in case this type doesn't exist yet.
+template <> struct NumericTraits<bfloat16>;
+
+using NumericTraitsType = std::conditional_t<is_defined<NumericTraits<bfloat16>>::value, ThrowAwayType, bfloat16>;
+
+template <> struct NumericTraits<NumericTraitsType>
+  : BaseTraits<FLOATING_POINT, true, false, unsigned short, bfloat16> {};
+
+template<> struct Traits<NumericTraitsType>
+  : NumericTraits<bfloat16> {};
+
+}  // namespace cub
+
 """
 
 

@@ -15,215 +15,127 @@
 """
 Softmax codegen for CUDA.
 """
+from __future__ import annotations
 
+import math
 import os
 from typing import Any, Dict
 
 import jinja2
 
-from ....compiler.base import IntImm
+from aitemplate.backend import registry
+from aitemplate.backend.backend_spec import CUDASpec
+from aitemplate.backend.target import Target
 
-from ... import registry
-from ...backend_spec import CUDASpec
-from ...target import Target
+from aitemplate.compiler.base import IntImm
 
 # pylint: disable=C0301, C0116
 
 
-# input size: [M, K]
+# input size: [M, K] where M == outer size (product of outer dims) and K == reduction dim
 # We put if else condition here to avoid long compilation time.
 # i.e. for each K, we only need to compile one of the implementation, not all.
 #
 # For each K, whether to use wrapReduce or blockReduce was done by experiment
-# Please refer to this post: https://fb.quip.com/HCfIAbpWB0qi
-# and this experiment log: https://docs.google.com/spreadsheets/d/1bl3GCLQ67p27kXOSVJikEob38fojqaZIS--mPdQxeo0/edit#gid=931264442
+# Please refer to this post: https://github.com/facebookincubator/AITemplate/wiki/How-to-write-a-fast-Softmax-CUDA-kernel%3F
+# and this experiment log [fb internal only]: https://docs.google.com/spreadsheets/d/1bl3GCLQ67p27kXOSVJikEob38fojqaZIS--mPdQxeo0/edit#gid=931264442
 FUNC_TEMPLATE = jinja2.Template(
     """
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
-#include "cutlass/cutlass.h"
-#include "cutlass/fast_math.h"
-#include "cutlass/platform/platform.h"
-#include <math_constants.h>
-#include <assert.h>
-#include <cuda.h>
-namespace {
-
 {{custom_libs}}
-
-}  // namespace
 
 {{func_signature}}
 {
   {{shape_functions}}
-  size_t m0 = {{m}};
-  size_t n = {{K}};
-  size_t m = M;
+  {{func_impl}}
+}
+    """
+)
+
+FUNC_IMPL_INNER_SIZE_EQ_1 = jinja2.Template(
+    """
+  const size_t M = outer_size;
   bool success = true;
 
+  // For threshold K, please refer to this post: https://fb.quip.com/HCfIAbpWB0qi
   {% if K <= 32 and K % 4 == 0 or K <= 8 %}
-    const int n_threads = 128;
-    const int m0_by_n_threads = m0 * n_threads;
-    dim3 block(n_threads);
-    dim3 grid((m + m0_by_n_threads - 1) / m0_by_n_threads);
-    Arguments<{{dtype}}> args = {
-      static_cast<{{dtype}}*>(input), static_cast<{{dtype}}*>(output)
-    };
-    softmax_small_k<{{dtype}}, float4, n_threads, {{K}}, {{m}}>
-        <<<grid, block, 0, stream>>>(args, m);
+    // K <= 32 and K % 4 == 0 or K <= 8
+    LaunchSoftmaxSmallK<{{dtype}}, {{K}}, {{m}}>(static_cast<const {{dtype}}*>(input), static_cast<{{dtype}}*>(output), M, stream);
   {% elif K % 8 == 0 %}
+    // K % 8 == 0: vector8 kernels
     {% if K/8 <=32 %}
-      int thread_group_width = -1;
-      for(auto i: {1, 8, 16, 32}){
-        if (8*i >= n){
-          thread_group_width = i;
-          break;
-        }
-      }
-      int thread_group_per_block = 128/thread_group_width;
-      int grid_dim_x = (m+thread_group_per_block-1)/thread_group_per_block;
-      dim3 grid(grid_dim_x);
-      dim3 block(thread_group_width, thread_group_per_block);
-      {% if dtype=="float" %}
-        softmax_stored_locally_multi_dim<float8,{{dtype}},8><<<grid, block, 0, stream>>>( (const float8*)input, (float8*)output, m, n);
-      {% elif "half" in dtype %}
-        softmax_stored_locally_multi_dim<float4,{{dtype}},8><<<grid, block, 0, stream>>>( (const float4*)input, (float4*)output, m, n);
-      {% endif %}
-    {% elif K <= 3840 %} // For threshold K, please refer to this post: https://fb.quip.com/HCfIAbpWB0qi
-      int thread_group_per_block = 128/32;//4
-      int grid_dim_x = (m+thread_group_per_block-1)/thread_group_per_block;
-      dim3 grid(grid_dim_x);
-      dim3 block(32,thread_group_per_block);
-      const int num_packs = (int(({{K}}+31)/32)+7)/8;
-      const int cols_per_thread = num_packs * 8;
-      {% if dtype=="float" %}
-        softmax_stored_locally_multi_dim<float8,{{dtype}},cols_per_thread><<<grid, block, 0, stream>>>((const float8*)input, (float8*)output, m, n);
-      {% elif "half" in dtype %}
-        softmax_stored_locally_multi_dim<float4,{{dtype}},cols_per_thread><<<grid, block, 0, stream>>>((const float4*)input, (float4*)output, m, n);
-      {% endif %}
-    {% elif dtype=="float" and K > 3840 %}
-        LaunchSoftmaxBlockAll<float8,{{dtype}},{{K}}>( (const float8*) input, (float8*) output, m, stream, &success);
-    {% elif "half" in dtype and K > 3840 %}
-        LaunchSoftmaxBlockAll<float4,{{dtype}},{{K}}>( (const float4*) input, (float4*) output, m, stream, &success);
+      // K/8 <= 32
+      LaunchSoftmaxK8Small<{{dtype}}, {{K}}>(static_cast<const {{dtype}}*>(input), static_cast<{{dtype}}*>(output), M, stream);
+    {% elif K <= 3840 %}
+      // 32 < K/8 <= 480
+      LaunchSoftmaxK8Middle<{{dtype}}, {{K}}>(static_cast<const {{dtype}}*>(input), static_cast<{{dtype}}*>(output), M, stream);
+    {% elif K > 3840 %}
+      // K/8 > 480
+      using vec8 = VecTFor<{{dtype}}>::vec8;
+      LaunchSoftmaxBlockAll<vec8, {{dtype}}, {{K}}>(reinterpret_cast<const vec8*>(input), reinterpret_cast<vec8*>(output), M, stream, &success);
     {% endif %}
   {% elif K % 4 == 0 %}
+    // K % 4 == 0: vector4 kernels
     {% if K/4 <=32 %}
-      int thread_group_width = -1;
-      for(auto i: {1, 4, 8, 16, 32}){
-        if (4*i >= n){
-          thread_group_width = i;
-          break;
-        }
-      }
-      int thread_group_per_block = 128/thread_group_width;
-      int grid_dim_x = (m+thread_group_per_block-1)/thread_group_per_block;
-      dim3 grid(grid_dim_x);
-      dim3 block(thread_group_width, thread_group_per_block);
-      {% if dtype=="float" %}
-        softmax_stored_locally_multi_dim<float4,{{dtype}},8><<<grid, block, 0, stream>>>( (const float4*)input, (float4*)output, m, n);
-      {% elif "half" in dtype %}
-        softmax_stored_locally_multi_dim<float2,{{dtype}},8><<<grid, block, 0, stream>>>( (const float2*)input, (float2*)output, m, n);
-      {% endif %}
-    {% elif K <= 1920 %} // For threshold K, please refer to this post: https://fb.quip.com/HCfIAbpWB0qi
-      int thread_group_per_block = 128/32;//4
-      int grid_dim_x = (m+thread_group_per_block-1)/thread_group_per_block;
-      dim3 grid(grid_dim_x);
-      dim3 block(32,thread_group_per_block);
-      const int num_packs = (int(({{K}}+31)/32)+3)/4;
-      const int cols_per_thread = num_packs * 8;
-      {% if dtype=="float" %}
-        softmax_stored_locally_multi_dim<float4,{{dtype}},cols_per_thread><<<grid, block, 0, stream>>>((const float4*)input, (float4*)output, m, n);
-      {% elif "half" in dtype %}
-        softmax_stored_locally_multi_dim<float2,{{dtype}},cols_per_thread><<<grid, block, 0, stream>>>((const float2*)input, (float2*)output, m, n);
-      {% endif %}
-    {% elif dtype=="float" and K > 1920 %}
-        LaunchSoftmaxBlockAll<float4,{{dtype}},{{K}}>( (const float4*) input, (float4*) output, m, stream, &success);
-    {% elif "half" in dtype and K > 1920 %}
-        LaunchSoftmaxBlockAll<float2,{{dtype}},{{K}}>( (const float2*) input, (float2*) output, m, stream, &success);
+      // K/4 <= 32
+      LaunchSoftmaxK4Small<{{dtype}}, {{K}}>(static_cast<const {{dtype}}*>(input), static_cast<{{dtype}}*>(output), M, stream);
+    {% elif K <= 1920 %}
+      // 32 < K/4 <= 480
+      LaunchSoftmaxK4Middle<{{dtype}}, {{K}}>(static_cast<const {{dtype}}*>(input), static_cast<{{dtype}}*>(output), M, stream);
+    {% elif K > 1920 %}
+      // K/4 > 480
+      using vec4 = VecTFor<{{dtype}}>::vec4;
+      LaunchSoftmaxBlockAll<vec4, {{dtype}}, {{K}}>(reinterpret_cast<const vec4*>(input), reinterpret_cast<vec4*>(output), M, stream, &success);
     {% endif %}
   {% elif K % 2 == 0 %}
+    // K % 2 == 0: vector2 kernels
     {% if K/2 <=32 %}
-      int thread_group_width = -1;
-      for(auto i: {1, 2, 4, 8, 16, 32}){
-        if (2*i >= n){
-          thread_group_width = i;
-          break;
-        }
-      }
-      int thread_group_per_block = 128/thread_group_width;
-      int grid_dim_x = (m+thread_group_per_block-1)/thread_group_per_block;
-      dim3 grid(grid_dim_x);
-      dim3 block(thread_group_width, thread_group_per_block);
-      {% if dtype=="float" %}
-        softmax_stored_locally_multi_dim<float2,{{dtype}},8><<<grid, block, 0, stream>>>( (const float2*)input, (float2*)output, m, n);
-      {% elif "half" in dtype %}
-        softmax_stored_locally_multi_dim<float,{{dtype}},8><<<grid, block, 0, stream>>>( (const float*)input, (float*)output, m, n);
-      {% endif %}
-    {% elif K <= 1152 %} // For threshold K, please refer to this post: https://fb.quip.com/HCfIAbpWB0qi
-      int thread_group_per_block = 128/32;//4
-      int grid_dim_x = (m+thread_group_per_block-1)/thread_group_per_block;
-      dim3 grid(grid_dim_x);
-      dim3 block(32,thread_group_per_block);
-      const int num_packs = (int(({{K}}+31)/32)+1)/2;
-      const int cols_per_thread = num_packs * 2;
-      {% if dtype=="float" %}
-        softmax_stored_locally_multi_dim<float2,{{dtype}},cols_per_thread><<<grid, block, 0, stream>>>((const float2*)input, (float2*)output, m, n);
-      {% elif "half" in dtype %}
-        softmax_stored_locally_multi_dim<float,{{dtype}},cols_per_thread><<<grid, block, 0, stream>>>((const float*)input, (float*)output, m, n);
-      {% endif %}
-    {% elif dtype=="float" and K > 1152 %}
-        LaunchSoftmaxBlockAll<float2,{{dtype}},{{K}}>( (const float2*) input, (float2*) output, m, stream, &success);
-    {% elif "half" in dtype and K > 1152 %}
-        LaunchSoftmaxBlockAll<float,{{dtype}},{{K}}>( (const float*) input, (float*) output, m, stream, &success);
+      // K/2 <= 32
+      LaunchSoftmaxK2Small<{{dtype}}, {{K}}>(static_cast<const {{dtype}}*>(input), static_cast<{{dtype}}*>(output), M, stream);
+    {% elif K <= 1152 %}
+      // 32 < K/2 <= 576
+      LaunchSoftmaxK2Middle<{{dtype}}, {{K}}>(static_cast<const {{dtype}}*>(input), static_cast<{{dtype}}*>(output), M, stream);
+    {% elif K > 1152 %}
+      // K/2 > 576
+      using vec2 = VecTFor<{{dtype}}>::vec2;
+      LaunchSoftmaxBlockAll<vec2, {{dtype}}, {{K}}>(reinterpret_cast<const vec2*>(input), reinterpret_cast<vec2*>(output), M, stream, &success);
     {% endif %}
   {% else %}
-    {% if K <=32 %}
-      int thread_group_width = -1;
-      for(auto i: {1, 2, 4, 8, 16, 32}){
-        if (i >= n){
-          thread_group_width = i;
-          break;
-        }
-      }
-      int thread_group_per_block = 128/thread_group_width;
-      int grid_dim_x = (m+thread_group_per_block-1)/thread_group_per_block;
-      dim3 grid(grid_dim_x);
-      dim3 block(thread_group_width, thread_group_per_block);
-      {% if dtype=="float" %}
-        softmax_stored_locally_multi_dim<float,{{dtype}},8><<<grid, block, 0, stream>>>( (const float*)input, (float*)output, m, n);
-      {% elif "half" in dtype %}
-        softmax_stored_locally_multi_dim<half,{{dtype}},8><<<grid, block, 0, stream>>>( (const half*)input, (half*)output, m, n);
-      {% endif %}
-    {% elif K <= 1408 %} // For threshold K, please refer to this post: https://fb.quip.com/HCfIAbpWB0qi
-      int thread_group_per_block = 128/32;//4
-      int grid_dim_x = (m+thread_group_per_block-1)/thread_group_per_block;
-      dim3 grid(grid_dim_x);
-      dim3 block(32,thread_group_per_block);
-      const int cols_per_thread = ({{K}}+31)/32;
-      {% if dtype=="float" %}
-        softmax_stored_locally_multi_dim<float,{{dtype}},cols_per_thread><<<grid, block, 0, stream>>>((const float*)input, (float*)output, m, n);
-      {% elif "half" in dtype %}
-        softmax_stored_locally_multi_dim<half,{{dtype}},cols_per_thread><<<grid, block, 0, stream>>>((const half*)input, (half*)output, m, n);
-      {% endif %}
-    {% elif dtype=="float" and K > 1408 %}
-        LaunchSoftmaxBlockAll<float,{{dtype}},{{K}}>( (const float*) input, (float*) output, m, stream, &success);
-    {% elif "half" in dtype and K > 1408 %}
-        LaunchSoftmaxBlockAll<half,{{dtype}},{{K}}>( (const half*) input, (half*) output, m, stream, &success);
+    // odd K
+    {% if K <= 32 %}
+      // K <= 32
+      LaunchSoftmaxK1Small<{{dtype}}, {{K}}>(static_cast<const {{dtype}}*>(input), static_cast<{{dtype}}*>(output), M, stream);
+    {% elif K <= 1408 %}
+      // 32 < K <= 1408
+      LaunchSoftmaxK1Middle<{{dtype}}, {{K}}>(static_cast<const {{dtype}}*>(input), static_cast<{{dtype}}*>(output), M, stream);
+    {% elif K > 1408 %}
+      // K > 1408
+      LaunchSoftmaxBlockAll<{{dtype}}, {{dtype}}, {{K}}>( (const {{dtype}}*) input, ({{dtype}}*) output, M, stream, &success);
     {% endif %}
   {% endif %}
 
-  if(!success){
-    softmaxBlockNocache<half><<<m, 1024, 0, stream>>>((half*)input, (half*)output, m, n);
+  if (!success) {
+    softmaxBlockNocache<{{dtype}}><<<M, 1024, 0, stream>>>(({{dtype}}*)input, ({{dtype}}*)output, M, {{K}});
   }
-}
+    """
+)
+
+FUNC_IMPL_GENERAL = jinja2.Template(
+    """
+    LaunchSoftmaxGeneral<{{dtype}}, {{dim_size}}, {{inner_size}}, {{dim_threads}}, {{inner_threads}}>(
+        (const {{dtype}}*) input,
+        ({{dtype}}*) output,
+        outer_size,
+        multiprocessor_count,
+        stream
+    );
     """
 )
 
 SHAPE_FUNCTIONS = jinja2.Template(
     """
-    int64_t M = 1;
-{% for idx in range(input_ndim - 1) %}
-    M *= *in_{{idx}};
+    int64_t outer_size = 1;
+{% for idx in range(reduction_dim) %}
+    outer_size *= *in_{{idx}};
 {% endfor %}
     """
 )
@@ -231,18 +143,20 @@ SHAPE_FUNCTIONS = jinja2.Template(
 FUNC_SIGNATURE = jinja2.Template(
     """
 void {{func_name}}(void* input,
-                   void* output,
-{% for idx in range(input_ndim - 1) %}
-                   int64_t* in_{{idx}},
+               void* output,
+{% for idx in range(reduction_dim) %}
+               int64_t* in_{{idx}},
 {% endfor %}
-                   cudaStream_t stream)
-    """
+               int multiprocessor_count,
+               cudaStream_t stream)
+    """,
+    trim_blocks=True,
 )
 
 FUNC_DECL = jinja2.Template(
     """
-    {{func_signature}};
-    """
+{{func_signature}};
+    """,
 )
 
 FUNC_CALL_TEMPLATE = jinja2.Template(
@@ -250,20 +164,21 @@ FUNC_CALL_TEMPLATE = jinja2.Template(
 {{indent}}{{func_name}}(
 {{indent}}   {{input}},
 {{indent}}   {{output}},
-{% for name in input_dim_names[:-1] %}
-{{indent}}    &{{name}},
+{% for name in outer_dim_names %}
+{{indent}}   &{{name}},
 {% endfor %}
+{{indent}}   device_properties_.multiProcessorCount,
 {{indent}}   stream
 {{indent}});
-    """
+    """,
+    trim_blocks=True,
 )
 
 
 def get_func_signature(func_attrs: Dict[str, Any]) -> str:
-    input_ndim = func_attrs["inputs"][0]._rank()
     return FUNC_SIGNATURE.render(
         func_name=func_attrs["name"],
-        input_ndim=input_ndim,
+        reduction_dim=func_attrs["dim"],
     ).strip()
 
 
@@ -282,35 +197,67 @@ def find_tile_size(k: int) -> int:
     return m
 
 
+def _softmax_general_block_size(dim_size: int, inner_size: int) -> tuple[int, int]:
+    MAX_THREADS_PER_BLOCK = 1024
+    WARP_SIZE = 32
+    assert inner_size != 0
+    inner_threads = min(inner_size, MAX_THREADS_PER_BLOCK)
+    dim_threads = 1
+    if inner_threads <= 32 and dim_size >= WARP_SIZE:
+        dim_threads = (
+            min(
+                MAX_THREADS_PER_BLOCK // inner_threads // WARP_SIZE,
+                dim_size // WARP_SIZE,
+            )
+            * WARP_SIZE
+        )
+    # When dim_threads > 1, warp reduction is done, and for our warp reduction
+    # impl to work, dim_threads needs to be a multiple of the warp size.
+    assert dim_threads == 1 or dim_threads % WARP_SIZE == 0
+    assert dim_threads != 0
+    return dim_threads, inner_threads
+
+
 @registry.reg("cuda.softmax.gen_function")
 def softmax_gen_function(func_attrs: Dict[str, Any]) -> str:
-    dim = func_attrs["dim"]
-    shapes = func_attrs["inputs"][0]._attrs["shape"]
-    rank = len(shapes)
+    reduction_dim = func_attrs["dim"]
+    shape = func_attrs["inputs"][0]._attrs["shape"]
 
-    assert (
-        dim == rank - 1
-    ), f"softmax only supports dim == rank - 1, dim={dim}, rank={rank}"
+    assert all(
+        isinstance(dim, IntImm) for dim in shape[reduction_dim:]
+    ), "softmax requires reduction dim & inner dims to be static"
 
-    assert isinstance(
-        shapes[dim], IntImm
-    ), "softmax requires reduction dim to be static"
-
-    k = shapes[dim].value()
+    dim_size = shape[reduction_dim].value()
 
     backend_spec = CUDASpec()
-    elem_input_type = backend_spec.dtype_to_lib_type(
+    elem_input_type = backend_spec.dtype_to_backend_type(
         func_attrs["inputs"][0]._attrs["dtype"]
     )
+
+    inner_size = math.prod(dim.value() for dim in shape[reduction_dim + 1 :])
+    if inner_size == 1:
+        func_impl = FUNC_IMPL_INNER_SIZE_EQ_1.render(
+            dtype=elem_input_type,
+            m=find_tile_size(dim_size),
+            K=dim_size,
+        )
+    else:
+        dim_threads, inner_threads = _softmax_general_block_size(dim_size, inner_size)
+        func_impl = FUNC_IMPL_GENERAL.render(
+            dtype=elem_input_type,
+            dim_size=dim_size,
+            inner_size=inner_size,
+            dim_threads=dim_threads,
+            inner_threads=inner_threads,
+        )
+
     return FUNC_TEMPLATE.render(
         custom_libs=Target.current().get_custom_libs(
             os.path.dirname(__file__), "softmax.cuh"
         ),
         func_signature=get_func_signature(func_attrs),
-        shape_functions=SHAPE_FUNCTIONS.render(input_ndim=rank),
-        dtype=elem_input_type,
-        K=k,
-        m=find_tile_size(k),
+        func_impl=func_impl,
+        shape_functions=SHAPE_FUNCTIONS.render(reduction_dim=reduction_dim),
     )
 
 
@@ -327,17 +274,18 @@ def softmax_gen_function_call(func_attrs, indent="  "):
     input_name = func_attrs["inputs"][0]._attrs["name"]
     output_name = func_attrs["outputs"][0]._attrs["name"]
 
-    shapes = func_attrs["inputs"][0]._attrs["shape"]
+    shape = func_attrs["inputs"][0]._attrs["shape"]
     assert (
-        len(shapes) >= 2
-    ), f"Softmax only supports input with rank >= 2, current rank: {len(shapes)}"
+        len(shape) >= 2
+    ), f"Softmax only supports input with rank >= 2, current rank: {len(shape)}"
 
-    input_dim_names = [shape._attrs["name"] for shape in shapes]
+    reduction_dim = func_attrs["dim"]
+    outer_dim_names = [dim._attrs["name"] for dim in shape[:reduction_dim]]
 
     return FUNC_CALL_TEMPLATE.render(
         func_name=func_attrs["name"],
         input=input_name,
         output=output_name,
-        input_dim_names=input_dim_names,
+        outer_dim_names=outer_dim_names,
         indent=indent,
     )

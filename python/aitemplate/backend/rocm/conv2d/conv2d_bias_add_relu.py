@@ -17,16 +17,15 @@ ROCM codegen functions for conv2d_bias_add_relu.
 """
 import jinja2
 
-from ... import registry
-from . import common
+from aitemplate.backend import registry
+from aitemplate.backend.rocm.conv2d import common
 
 # pylint: disable=C0103,C0415,W0613
 
 EXTRA_CODE = jinja2.Template(
     """
-#include "ck/tensor_operation/gpu/device/device_grouped_conv_fwd_multiple_d_xdl_cshuffle.hpp"
+#include "ck/tensor_operation/gpu/device/impl/device_grouped_conv_fwd_multiple_d_xdl_cshuffle.hpp"
 
-#include "data_type.hpp"
 
 namespace ck {
 namespace tensor_operation {
@@ -34,28 +33,11 @@ namespace element_wise {
 namespace {
 struct AddAddRelu
 {
-    __host__ __device__ constexpr void
-    operator()(half_t& y, const half_t& x0, const half_t& x1, const half_t& x2) const
-    {
-        half_t a = x0 + x1 + x2;
-        y = a > 0 ? a : 0;
-    }
-
-    __host__ __device__ constexpr void
-    operator()(float& y, const float& x0, const float& x1, const float& x2) const
-    {
-        float a = x0 + x1+ x2;
-        float b = a > 0 ? a : 0;
-        y       = b;
-    }
-
-    __host__ __device__ constexpr void
-    operator()(half_t& y, const float& x0, const half_t& x1, const half_t& x2) const
-    {
-        float a = x0 + x1 + x2;
-        float b = a > 0 ? a : 0;
-        y       = b;
-    }
+    template <typename T>
+    __host__ __device__ constexpr void operator()(T& y, const T& x0, const T& x1, const T& x2) const{
+        ck::tensor_operation::element_wise::AddAdd{}(y, x0, x1, x2);
+        ck::tensor_operation::element_wise::Relu{}(y, y);
+    };
 };
 } // namespace
 } // namespace element_wise
@@ -115,7 +97,7 @@ def conv2d_gen_profiler(func_attrs, workdir, shape_template):
 @registry.reg("rocm.conv2d_bias_add_relu.gen_function")
 def conv2d_gen_function(
     func_attrs,
-    exec_cond_remplate,
+    exec_cond_template,
     shape_eval_template,
     shape_save_template,
 ):
@@ -125,7 +107,7 @@ def conv2d_gen_function(
     ----------
     func_attrs : Dict
         Operation attributes.
-    exec_cond_remplate : jinja2.Template
+    exec_cond_template : jinja2.Template
         Generates if statement to execute kernel.
     shape_eval_template : jinja2.Template
         Generates shape calculation.
@@ -141,7 +123,7 @@ def conv2d_gen_function(
     extra_code = EXTRA_CODE.render()
     return common.gen_function(
         func_attrs,
-        exec_cond_remplate,
+        exec_cond_template,
         shape_eval_template,
         shape_save_template,
         "bias_add_relu",

@@ -17,11 +17,9 @@ Perform fusions for permute+bmm operators.
 """
 from typing import Callable, List, Optional, Set, Tuple, Type, Union
 
-from aitemplate.compiler.ops.tensor.permute import permute
-
-from .. import ops
-from ..base import IntImm, Operator, Tensor
-from ..ops.gemm_universal import (
+from aitemplate.compiler import ops
+from aitemplate.compiler.base import IntImm, IntVar, Operator, Tensor
+from aitemplate.compiler.ops.gemm_universal import (
     bmm_ccr,
     bmm_crr,
     bmm_rcr,
@@ -31,9 +29,11 @@ from ..ops.gemm_universal import (
     gemm_rrr,
     gemm_rrr_bias,
 )
-from ..ops.tensor import permute021
-from .fuse_utils import extract_only_one_op
-from .transform_utils import (
+from aitemplate.compiler.ops.tensor import permute021
+
+from aitemplate.compiler.ops.tensor.permute import permute
+from aitemplate.compiler.transform.fuse_utils import extract_only_one_op
+from aitemplate.compiler.transform.transform_utils import (
     copy_src_op_attributes,
     copy_tensor_attributes,
     remove_dst_op_from_tensor,
@@ -41,6 +41,8 @@ from .transform_utils import (
     replace_tensor,
     sanitize_sorted_graph,
 )
+
+from aitemplate.utils import alignment
 
 # pylint: disable=C0103,W0612
 
@@ -135,16 +137,22 @@ def _fuse_permute_impl(
         # TODO: Check whether the input is weight to have better compile time
         #       optimization on preprocessing of pad etc.
         permute_shape = tensor.shape()
+        permute_dtype = tensor.dtype()
         prepermute_shape = input_tensor.shape()
+        prepermute_dtype = input_tensor.dtype()
 
         if (
             isinstance(prepermute_shape[-1], IntImm)
-            and prepermute_shape[-1].value() % 2 == 1
+            and (
+                not alignment.valid_alignment(
+                    prepermute_shape[-1].value(), prepermute_dtype
+                )
+            )
             and isinstance(permute_shape[-1], IntImm)
-            and permute_shape[-1].value() % 2 == 0
+            and alignment.valid_alignment(permute_shape[-1].value(), permute_dtype)
         ):
             # We don't run the permute+bmm fusion if the permute op could
-            # turn an odd alignment into even alignment.
+            # turn an invalid alignment into a valid alignment.
             continue
 
         fused = True
@@ -203,7 +211,27 @@ def fuse_permute_bmm_and_gemm(
         if not op._attrs["op"].startswith("gemm"):
             return False
         inputs = op._attrs["inputs"]
-        return len(inputs[0].shape()) != 2 or len(inputs[1].shape()) != 2
+        # cutlass's bmm assigns the batch size to grid_z, which
+        # cannot exceeds 65535
+        MAX_B_DIM_VAL = 65535
+
+        def _valid_shape(shape: List[Union[IntImm, IntVar]]):
+            b_dim = shape[0]
+            if isinstance(b_dim, IntImm):
+                b_dim_val = b_dim.value()
+            else:
+                b_dim_val = b_dim.upper_bound()
+            return b_dim_val <= MAX_B_DIM_VAL
+
+        input_shape_0 = inputs[0].shape()
+        input_shape_1 = inputs[1].shape()
+        if len(input_shape_0) != 3 and len(input_shape_1) != 3:
+            return False
+        if len(input_shape_0) == 3 and not _valid_shape(input_shape_0):
+            return False
+        if len(input_shape_1) == 3 and not _valid_shape(input_shape_1):
+            return False
+        return True
 
     def _is_transpose(op: Operator):
         if op._attrs["op"] != "permute":

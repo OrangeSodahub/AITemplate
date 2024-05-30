@@ -18,20 +18,28 @@ Rocm target specialization.
 # pylint: disable=W0702,W0707,W0611,C0415
 
 import json
+import logging
 import os
 import re
 import shutil
 import sys
 from typing import List
 
-from aitemplate.backend.target import AIT_STATIC_FILES_PATH
+from aitemplate.backend import registry
 
-from ...utils import logger
+from aitemplate.backend.target import (
+    AIT_STATIC_FILES_PATH,
+    COMPOSABLE_KERNEL_PATH,
+    Target,
+)
 
-from .. import registry
-from ..target import COMPOSABLE_KERNEL_PATH, Target
+from aitemplate.utils import environ
+from aitemplate.utils.misc import is_linux
 
 # pylint: disable=W0613
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class ROCM(Target):
@@ -79,62 +87,18 @@ class ROCM(Target):
         rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
         return rocm_path
 
-    def _get_ck_paths(self):
+    def _get_ck_paths(self) -> List[str]:
         ck_paths = [
             os.path.join(self._template_path),
             os.path.join(self._template_path, "include/"),
-            os.path.join(self._template_path, "include/ck/"),
-            os.path.join(self._template_path, "include/ck/problem_transform/"),
-            os.path.join(self._template_path, "include/ck/tensor/"),
-            os.path.join(self._template_path, "include/ck/tensor_description/"),
-            os.path.join(self._template_path, "include/ck/tensor_operation/"),
-            os.path.join(self._template_path, "include/ck/tensor_operation/gpu/block/"),
-            os.path.join(
-                self._template_path, "include/ck/tensor_operation/gpu/device/"
-            ),
-            os.path.join(
-                self._template_path, "include/ck/tensor_operation/gpu/device/impl/"
-            ),
-            os.path.join(
-                self._template_path, "include/ck/tensor_operation/gpu/element/"
-            ),
-            os.path.join(self._template_path, "include/ck/tensor_operation/gpu/grid/"),
-            os.path.join(
-                self._template_path, "include/ck/tensor_operation/gpu/thread/"
-            ),
-            os.path.join(self._template_path, "include/ck/tensor_operation/gpu/warp/"),
-            os.path.join(self._template_path, "include/ck/utility/"),
-            os.path.join(self._template_path, "include/ck/host_utility"),
             os.path.join(self._template_path, "external/include/half/"),
-            os.path.join(self._template_path, "library/include/ck/library/host/"),
-            os.path.join(
-                self._template_path, "library/include/ck/library/host_tensor/"
-            ),
-            os.path.join(
-                self._template_path,
-                "library/include/ck/library/obselete_driver_offline/",
-            ),
-            os.path.join(
-                self._template_path,
-                "library/include/ck/library/reference_tensor_operation/cpu/",
-            ),
-            os.path.join(
-                self._template_path,
-                "library/include/ck/library/reference_tensor_operation/gpu/",
-            ),
-            os.path.join(
-                self._template_path,
-                "library/include/ck/library/tensor_operation_instance/",
-            ),
-            os.path.join(
-                self._template_path,
-                "library/include/ck/library/tensor_operation_instance/gpu/" + "reduce/",
-            ),
-            os.path.join(self._template_path, "library/include/ck/library/tensor_op/"),
-            os.path.join(self._template_path, "library/include/ck/library/utility/"),
+            os.path.join(self._template_path, "library/include/"),
             os.path.join(self._template_path, "profiler/include/"),
         ]
         return ck_paths
+
+    def get_include_directories(self) -> List[str]:
+        return self._get_ck_paths()
 
     def _build_compile_options(self):
         """Build compilation commands, including compilation flag library and includes.
@@ -152,7 +116,7 @@ class ROCM(Target):
 
         ck_paths = self._get_ck_paths()
         options = [
-            "-O3",
+            environ.get_compiler_opt_level(),
             "-fPIC",
             "-fvisibility=hidden",
             "-std=c++17",
@@ -164,14 +128,15 @@ class ROCM(Target):
         ]
         if self._arch in {"GFX908", "gfx908"}:
             options.append("-DCK_AMD_GPU_GFX908")
-            options.append("--amdgpu-target=gfx908")
+            options.append("--offload-arch=gfx908")
         elif self._arch in {"GFX90a", "gfx90a"}:
             options.append("-DCK_AMD_GPU_GFX90A")
-            options.append("--amdgpu-target=gfx90a")
+            options.append("--offload-arch=gfx90a")
         else:
             raise RuntimeError("Unsupported GPU Arch")
         for path in ck_paths:
             options.append("-I" + path)
+        options.append("-I" + os.path.join(self.static_files_path, "include"))
         rocrand_path = os.path.join(self._pkg_path(), "rocrand/lib/")
         options.append("-L" + rocrand_path)
         options.append("-lrocrand")
@@ -305,9 +270,7 @@ class FBROCM(ROCM):
         convert_hippcc_json = parutil.get_file_path(
             os.path.join("aitemplate/testing", "convert_hipcc_cmd")
         )
-        logger.info(
-            __name__, f"Load the hipcc compile option from {convert_hippcc_json}"
-        )
+        _LOGGER.info(f"Load the hipcc compile option from {convert_hippcc_json}")
         with open(convert_hippcc_json, "r") as hipcc_options_json:
             self.hipcc_options_json = json.load(hipcc_options_json)
 
@@ -329,7 +292,7 @@ class FBROCM(ROCM):
 
         ck_paths = self._get_ck_paths()
         options = self.hipcc_options_json["args"] + [
-            "-O3",
+            environ.get_compiler_opt_level(),
             "-fPIC",
             "-fvisibility=hidden",
             "-std=c++17",
@@ -360,7 +323,16 @@ class FBROCM(ROCM):
         There is no ld by default in the prod env. Instead, we use ld from the gvfs path.
         """
         ld = self.hipcc_options_json["ld"]
-        return " ".join([ld, "-r -b binary -o {target} {src}"])
+        objcopy = self.hipcc_options_json["objcopy"]
+        cmd = " ".join([ld, "-r -b binary -o {target} {src}"])
+        # Support models with >2GB constants on Linux only
+        if is_linux():
+            cmd += (
+                f" && {objcopy} --rename-section"
+                " .data=.lrodata,alloc,load,readonly,data,contents"
+                " {target} {target}"
+            )
+        return cmd
 
     def cc(self):
         return self.hipcc_options_json["hipcc_bin"]

@@ -14,17 +14,8 @@
 
 import unittest
 from random import randrange
-
-from aitemplate.backend import profiler_runner
-
-profiler_runner.extract_profile_result = lambda _: (
-    "",
-    False,
-)
-
 from time import sleep
-
-from aitemplate.backend.cuda.target_def import CUDA as CUDATarget
+from unittest.mock import patch
 
 from aitemplate.backend.profiler_runner import ProfilerRunner
 
@@ -56,7 +47,10 @@ def delegate_cb_wrapper(idx, value):
 
 class ProfilerTestCase(unittest.TestCase):
     def test_profiler_runner(self):
-        with CUDATarget() as _:
+        with patch(
+            "aitemplate.backend.profiler_runner.extract_profile_result"
+        ) as mock_extract_profile_result:
+            mock_extract_profile_result.return_value = ("", False)
             pr = ProfilerRunner(
                 devices=[str(i) for i in range(12)],
                 timeout=60,

@@ -17,9 +17,9 @@ Codegen functions for multi-level roi align.
 """
 import jinja2
 
-from .... import registry
-from ....backend_spec import CUDASpec
-from ....common.vision_ops import multi_level_roi_align_common
+from aitemplate.backend import registry
+from aitemplate.backend.backend_spec import CUDASpec
+from aitemplate.backend.common.vision_ops import multi_level_roi_align_common
 
 # pylint: disable=C0103,C0415,W0613,C0301,W0612
 
@@ -36,7 +36,7 @@ EXTRA_HEADER = jinja2.Template(
 def gen_function(
     func_attrs,
     template_path,
-    exec_cond_remplate,
+    exec_cond_template,
     shape_eval_template,
     shape_save_template,
 ):
@@ -45,8 +45,8 @@ def gen_function(
     x = func_attrs["inputs"][0]
     y = func_attrs["outputs"][0]
     backend_spec = CUDASpec()
-    input_type = backend_spec.dtype_to_lib_type(x._attrs["dtype"])
-    output_type = backend_spec.dtype_to_lib_type(y._attrs["dtype"])
+    input_type = backend_spec.dtype_to_backend_type(x._attrs["dtype"])
+    output_type = backend_spec.dtype_to_backend_type(y._attrs["dtype"])
 
     exec_paths = ""
     for key, _ in exec_path.items():
@@ -59,7 +59,7 @@ def gen_function(
             position_sensitive=func_attrs["position_sensitive"],
             continuous_coordinate=func_attrs["continuous_coordinate"],
         )
-        exec_inst = exec_cond_remplate.render(indent="  ", cond=key, program=program)
+        exec_inst = exec_cond_template.render(indent="  ", cond=key, program=program)
         exec_paths += exec_inst
     return multi_level_roi_align_common.SRC_TEMPLATE.render(
         function_name=func_name,

@@ -19,9 +19,9 @@ This is used for `ops.bmm_crr`.
 """
 import jinja2
 
-from ... import registry
-from . import bmm_common, common
-from .layout import CRR
+from aitemplate.backend import registry
+from aitemplate.backend.rocm.gemm import bmm_common, common
+from aitemplate.backend.rocm.gemm.layout import CRR
 
 
 ARGS_PARSER_TEMPLATE = jinja2.Template(
@@ -109,7 +109,19 @@ def bmm_gen_function(func_attrs, exec_cond_template, dim_info_dict):
     str
         The rendered template of generated function body.
     """
-    return bmm_common.gen_function(func_attrs, exec_cond_template, dim_info_dict, "")
+    return bmm_common.gen_function(
+        func_attrs,
+        exec_cond_template,
+        dim_info_dict,
+        "",
+        input_addr_calculator=bmm_common.INPUT_ADDR_CALCULATOR.render(
+            accessor_a=func_attrs["input_accessors"][0],
+            accessor_b=func_attrs["input_accessors"][1],
+        ),
+        output_addr_calculator=bmm_common.OUTPUT_ADDR_CALCULATOR.render(
+            output_accessor=func_attrs["output_accessors"][0]
+        ),
+    )
 
 
 @registry.reg("rocm.bmm_crr.func_decl")

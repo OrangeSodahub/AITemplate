@@ -20,15 +20,15 @@ When used for `linear`, need to set A->Data, B->Weight, C->Bias
 """
 import jinja2
 
-from ... import registry
-from . import common
-from .layout import RCR
+from aitemplate.backend import registry
+from aitemplate.backend.rocm.gemm import common
+from aitemplate.backend.rocm.gemm.layout import RCR
 
 # pylint: disable=C0415,W0613
 
 EXTRA_CODE = jinja2.Template(
     """
-#include "data_type.hpp"
+#include "ck/utility/data_type.hpp"
 
 namespace ck {
 namespace tensor_operation {
@@ -145,6 +145,13 @@ def gemm_gen_function(func_attrs, exec_cond_template, dim_info_dict):
         dim_info_dict,
         "bias_tanh",
         extra_code=EXTRA_CODE.render(),
+        input_addr_calculator=common.INPUT_ADDR_CALCULATOR.render(
+            accessor_a=func_attrs["input_accessors"][0],
+            accessor_b=func_attrs["input_accessors"][1],
+        ),
+        output_addr_calculator=common.OUTPUT_ADDR_CALCULATOR.render(
+            output_accessor=func_attrs["output_accessors"][0]
+        ),
     )
 
 

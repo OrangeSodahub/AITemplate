@@ -44,9 +44,7 @@ EXEC_TEMPLATE = jinja2.Template(
 {{indent}}                                           input_left_pads,
 {{indent}}                                           input_right_pads);
 {{indent}}if(!op.IsSupportedArgument(argument_ptr.get())) {
-{{indent}}  throw std::runtime_error(
-{{indent}}    "wrong! device_conv with the specified compilation parameters does "
-{{indent}}    "not support this Conv problem");
+{{indent}}  LOG(FATAL) << "wrong! " << op.GetTypeString() << " with the specified compilation parameters does not support this Pool problem.";
 {{indent}}}
 {{indent}}invoker_ptr->Run(argument_ptr.get(), StreamConfig{stream, false});
 {{indent}}return;
@@ -60,13 +58,14 @@ SRC_TEMPLATE = jinja2.Template(
 #include <initializer_list>
 #include <cstdlib>
 #include <stdlib.h>
+#include "logging.h"
 #include "include/ck/utility/print.hpp"
 #include "library/include/ck/library/utility/device_memory.hpp"
 #include "library/include/ck/library/utility/host_tensor.hpp"
 #include "library/include/ck/library/utility/host_tensor_generator.hpp"
 #include "include/ck/tensor_operation/gpu/device/tensor_layout.hpp"
 #include "include/ck/utility/reduction_operator.hpp"
-#include "include/ck/tensor_operation/gpu/device/device_pool2d_fwd_nhwc_nhwc.hpp"
+#include "include/ck/tensor_operation/gpu/device/impl/device_pool2d_fwd_nhwc_nhwc.hpp"
 
 {{instances}}
 
@@ -157,7 +156,7 @@ FUNC_CALL_TEMPLATE = jinja2.Template(
 
 def gen_function(
     func_attrs,
-    exec_cond_remplate,
+    exec_cond_template,
     shape_eval_template,
     shape_save_template,
 ):
@@ -227,7 +226,7 @@ def gen_function(
     for key in instances:
         fname = "f" + sha1(key.encode()).hexdigest()
         program = EXEC_TEMPLATE.render(indent="    ", instance=fname)
-        exec_inst = exec_cond_remplate.render(indent="  ", cond=key, program=program)
+        exec_inst = exec_cond_template.render(indent="  ", cond=key, program=program)
         exec_paths += exec_inst
     return SRC_TEMPLATE.render(
         instances=instance_decl,

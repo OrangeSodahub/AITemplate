@@ -17,12 +17,22 @@ mark tensors which are parameters
 """
 from typing import List
 
-from ..base import Tensor
+from aitemplate.compiler.base import Tensor
 
 # pylint: disable=C0103,W0613
 
 
 def mark_special_views(sorted_graph: List[Tensor]):
+    """
+    Associate each tensor with an external tensor if any of the conditions are true:
+    1. The tensor is a view-of-a-view of an external tensor.
+    2. The tensor is a view of an input, constant or output tensor (i.e. external tensor).
+
+    Parameters
+    ----------
+    sorted_graph : List[Tensor]
+        The graph to mutate.
+    """
     for node in sorted_graph:
         view = node._attrs["is_view_of"]
         if view is None:

@@ -18,7 +18,12 @@ import re
 import shutil
 import tempfile
 
-from . import extra_conv_emit, extra_cutlass_generator, extra_enum, extra_gemm_emit
+from aitemplate.utils.mk_cutlass_lib import (
+    extra_conv_emit,
+    extra_cutlass_generator,
+    extra_enum,
+    extra_gemm_emit,
+)
 
 
 def mk_cutlass_lib(template_path, dst_prefix=None):
@@ -65,6 +70,8 @@ def mk_cutlass_lib(template_path, dst_prefix=None):
 
     src_prefix = os.path.join(template_path, "tools/library/scripts")
     srcs = os.listdir(src_prefix)
+    if "__init__.py" in srcs:
+        srcs.remove("__init__.py")
     for file in srcs:
         src_path = os.path.join(src_prefix, file)
         if not os.path.isfile(src_path):
@@ -80,7 +87,7 @@ def mk_cutlass_lib(template_path, dst_prefix=None):
     return dst_prefix
 
 
-if __name__ == "__main__":
+def main() -> None:
     cutlass_path = os.getenv("SRCDIR")
     output_path = os.getenv("OUT")
 
@@ -88,3 +95,7 @@ if __name__ == "__main__":
     assert cutlass_path is not None
 
     mk_cutlass_lib(cutlass_path + "/cutlass", os.path.dirname(output_path))
+
+
+if __name__ == "__main__":
+    main()  # pragma: no cover

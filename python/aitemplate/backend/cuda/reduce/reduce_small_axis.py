@@ -21,7 +21,7 @@ import math
 
 import jinja2
 
-from ....compiler.base import IntImm
+from aitemplate.compiler.base import IntImm
 
 
 EXEC_COND_TEMPLATE = jinja2.Template(
@@ -68,18 +68,20 @@ KERNEL_SRC_TEMPLATE = jinja2.Template(
     """
 constexpr const int ThreadsPerBlock = 128;
 
-template <typename ElemT,
+template <typename ElementInput,
+          typename ElementOutput,
           typename ElementCompute,
           typename ReadVecT,
           typename WriteVecT,
           int64_t num_rows_per_thread,
           int64_t num_cols>
 __global__ void reduce_small_in_v_out_v(
-    ElemT *output,
-    const ElemT *input,
+    ElementOutput *output,
+    const ElementInput *input,
     int64_t num_rows,
     int64_t batch_stride_input,
-    int64_t batch_stride_output) {
+    int64_t batch_stride_output,
+    ElementCompute reduction_identity) {
   int block_batch = blockIdx.y;
   // index within the batch
   const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -88,13 +90,13 @@ __global__ void reduce_small_in_v_out_v(
     return;
   // input within the batch
   int64_t input_offset = idx * num_cols;
-  const ElemT *this_input =
+  const ElementInput *this_input =
       input + block_batch * batch_stride_input + input_offset;
   size_t output_idx = block_batch * batch_stride_output + idx;
-  ElemT *this_output = get_strided_address_at_idx<ElemT, ElemT>(output, output_idx);
+  ElementOutput *this_output = get_strided_address_at_idx<ElementOutput, ElementOutput>(output, output_idx);
 
-  static_assert(sizeof(ReadVecT) % sizeof(ElemT) == 0);
-  constexpr int n_read_elems_in_v = sizeof(ReadVecT) / sizeof(ElemT);
+  static_assert(sizeof(ReadVecT) % sizeof(ElementInput) == 0);
+  constexpr int n_read_elems_in_v = sizeof(ReadVecT) / sizeof(ElementInput);
   // number of original elements
   constexpr int64_t num_elems_per_thread = num_rows_per_thread * num_cols;
   // number of vector elements
@@ -114,7 +116,7 @@ __global__ void reduce_small_in_v_out_v(
 
   // compute
   using FragmentCompute = ElementCompute;
-  ElemT *read_elems = reinterpret_cast<ElemT *>(read_elems_v);
+  ElementInput *read_elems = reinterpret_cast<ElementInput *>(read_elems_v);
   using ReduceScalarOp = {{reduce_op}}<ElementCompute>;
   ReduceScalarOp reduce_s_op;
   constexpr int num_reduced_elems = num_cols;
@@ -126,26 +128,27 @@ __global__ void reduce_small_in_v_out_v(
     {{epilogue_scalar_code}}
   };
 
-  ElemT reduced_elems[num_rows_per_thread];
+  ElementOutput reduced_elems[num_rows_per_thread];
   static_assert(num_elems_per_thread % num_cols == 0);
+  cutlass::NumericConverter<ElementCompute, ElementInput> convert_input;
   CUTLASS_PRAGMA_UNROLL
   for (int64_t i = 0; i < num_elems_per_thread / num_cols; i++) {
     static_assert(num_elems_per_thread % num_rows_per_thread == 0);
-    FragmentCompute frag_compute = FragmentCompute(0);
+    FragmentCompute frag_compute = FragmentCompute(reduction_identity);
     CUTLASS_PRAGMA_UNROLL
     for (int64_t j = 0; j < num_cols; j++) {
       int64_t read_idx = i * num_cols + j;
-      FragmentCompute tmp = prologue_fn(read_elems[read_idx]);
+      FragmentCompute tmp = prologue_fn(convert_input(read_elems[read_idx]));
       frag_compute = reduce_s_op(frag_compute, tmp);
     }
-    cutlass::NumericConverter<ElemT, ElementCompute> convert_output;
+    cutlass::NumericConverter<ElementOutput, ElementCompute> convert_output;
     ElementCompute tmp = epilogue_scalar_fn(frag_compute);
     reduced_elems[i] = convert_output(tmp);
   }
 
   WriteVecT *this_output_v = reinterpret_cast<WriteVecT*>(this_output);
   WriteVecT *reduced_elems_v = reinterpret_cast<WriteVecT*>(&reduced_elems[0]);
-  constexpr int n_write_elems_in_v = sizeof(WriteVecT) / sizeof(ElemT);
+  constexpr int n_write_elems_in_v = sizeof(WriteVecT) / sizeof(ElementOutput);
   CUTLASS_PRAGMA_UNROLL
 {% if output_accessor.is_contiguous %}
   for (int64_t i = 0; i < num_rows_per_thread / n_write_elems_in_v; i++) {
@@ -164,13 +167,13 @@ __global__ void reduce_small_in_v_out_v(
 {% endif %}
 }
 
-template <typename ElemOutputType,
-          typename ElemInputType,
-          typename ElemComputeType,
+template <typename ElementOutput,
+          typename ElementInput,
+          typename ElementCompute,
           int64_t num_cols>
 void reduce_mean_launcher_small_axis(
-  ElemOutputType *output,
-  ElemInputType *input,
+  ElementOutput *output,
+  ElementInput *input,
   int64_t num_batches,
   int64_t num_rows,
   int64_t batch_stride_input,
@@ -178,16 +181,16 @@ void reduce_mean_launcher_small_axis(
   cudaStream_t stream
 ) {
   constexpr int64_t num_read_v =
-      sizeof({{read_vec_type}}) / sizeof(ElemInputType);
+      sizeof({{read_vec_type}}) / sizeof(ElementInput);
   constexpr int64_t row_gcd = std::gcd(num_cols, num_read_v);
   constexpr int64_t num_rows_per_thread = num_read_v / row_gcd;
 {% if output_accessor.is_contiguous %}
   constexpr int64_t num_write_bytes_v =
-      num_rows_per_thread * sizeof(ElemOutputType);
+      num_rows_per_thread * sizeof(ElementOutput);
 {% else %}
   constexpr int64_t num_write_bytes_v =
       std::min(num_rows_per_thread, static_cast<int64_t>({{output_access_alignment}})) *
-      sizeof(ElemOutputType);
+      sizeof(ElementOutput);
 {% endif %}
 
   assert(num_rows % num_rows_per_thread == 0);
@@ -198,9 +201,10 @@ void reduce_mean_launcher_small_axis(
   if (num_rows % num_rows_per_thread == 0) {
 
 #define HANDLE_ONE_WRITE_VEC(write_bytes, write_vec_type) \\
-    case write_bytes:                                     \\
-      reduce_small_in_v_out_v<ElemInputType,              \\
-                              ElemComputeType,            \\
+    if (write_bytes == num_write_bytes_v) {               \\
+      reduce_small_in_v_out_v<ElementInput,               \\
+                              ElementOutput,              \\
+                              ElementCompute,             \\
                               {{read_vec_type}},          \\
                               write_vec_type,             \\
                               num_rows_per_thread,        \\
@@ -210,27 +214,30 @@ void reduce_mean_launcher_small_axis(
           input,                                          \\
           num_rows,                                       \\
           batch_stride_input,                             \\
-          batch_stride_output);                           \\
-      break;                                              \\
-
-    switch(num_write_bytes_v) {
-      HANDLE_ONE_WRITE_VEC(16, uint4)
-      HANDLE_ONE_WRITE_VEC(8, uint2)
-      HANDLE_ONE_WRITE_VEC(4, unsigned)
-      HANDLE_ONE_WRITE_VEC(2, cutlass::half_t)
-      default:
-        throw std::runtime_error("unsupported vector size for write");
+          batch_stride_output,                            \\
+          {{reduction_identity}});                        \\
+      LAUNCH_CHECK_REDUCE();                              \\
+      return;                                             \\
     }
+    HANDLE_ONE_WRITE_VEC(16, uint4)
+    HANDLE_ONE_WRITE_VEC(8, uint2)
+    HANDLE_ONE_WRITE_VEC(4, unsigned)
+    if constexpr (std::is_same_v<ElementOutput, cutlass::half_t>) {
+      HANDLE_ONE_WRITE_VEC(2, cutlass::half_t)
+    }
+    else if constexpr (std::is_same_v<ElementOutput, cutlass::bfloat16_t>) {
+      HANDLE_ONE_WRITE_VEC(2, cutlass::bfloat16_t)
+    }
+    throw std::runtime_error("unsupported vector size for write");
   } else {
     throw std::runtime_error("unsupported num_row_per_threads");
   }
-  LAUNCH_CHECK_REDUCE();
 }
 
-template <typename ElemOutputType, typename ElemInputType>
+template <typename ElementOutput, typename ElementInput>
 void reduce_mean_launcher_small_axis_column_major(
-  ElemOutputType *output,
-  ElemInputType *input,
+  ElementOutput *output,
+  ElementInput *input,
   int64_t num_batches,
   int64_t num_rows,
   int64_t num_columns,
@@ -270,6 +277,8 @@ def _get_read_vector_type(input_shape, input_type, force_min_vec_type=False) -> 
     type_to_size_in_bit = {
         "half": 16,
         "cutlass::half_t": 16,
+        "bfloat16": 16,
+        "cutlass::bfloat16_t": 16,
         "float": 32,
     }
 
@@ -278,22 +287,40 @@ def _get_read_vector_type(input_shape, input_type, force_min_vec_type=False) -> 
     # (2) the input type is inherited from reduce_3d, so we still
     #     use cutlass::half_t for fp16. We will replace it to half once we
     #     unify our half representation
-    vector_types = [
-        ("uint4", 16),
-        ("uint2", 8),
-        ("unsigned", 4),
-        ("cutlass::half_t", 2),
-    ]
+    vector_types = {
+        "cutlass::half_t": [
+            ("uint4", 16),
+            ("uint2", 8),
+            ("unsigned", 4),
+            ("cutlass::half_t", 2),
+        ],
+        "cutlass::bfloat16_t": [
+            ("uint4", 16),
+            ("uint2", 8),
+            ("unsigned", 4),
+            ("cutlass::bfloat16_t", 2),
+        ],
+        "float": [
+            ("uint4", 16),
+            ("uint2", 8),
+            ("unsigned", 4),
+        ],
+    }
 
     def _size_to_vector_type(sz_in_byte) -> str:
         """return vector_type for the given size"""
-        for vec_type, sz in vector_types:
+        for vec_type, sz in vector_types[input_type]:
             if sz_in_byte % sz == 0:
                 return vec_type
         raise NotImplementedError("Unsupported vector size: {}".format(sz_in_byte))
 
     reduction_axis = -1
-    assert isinstance(input_shape[reduction_axis], IntImm)
+
+    if not isinstance(input_shape[reduction_axis], IntImm):
+        # the last dimension is IntVar, so the best we can do in
+        # terms of the read vector type is the input_type iteself
+        return input_type
+
     rank = len(input_shape)
     reduction_dim_val = input_shape[reduction_axis]._attrs["values"][0]
     input_type_sz_in_bit = type_to_size_in_bit.get(input_type)
@@ -336,7 +363,7 @@ def _get_read_vector_type(input_shape, input_type, force_min_vec_type=False) -> 
             return False
         return True
 
-    for vec_type, sz in vector_types:
+    for vec_type, sz in vector_types[input_type]:
         if _valid_vector_type(vec_type, sz):
             return vec_type
 
@@ -354,6 +381,7 @@ def get_exec_cond_and_kernel(
     acc_type,
     output_accessors,
     output_alignment,
+    reduction_identity,
 ) -> str:
     """return a pair that contains the execution condition for this special
        reduction kernel and the source code of this reduction kernel
@@ -425,6 +453,7 @@ def get_exec_cond_and_kernel(
         )
     kernel_src = KERNEL_SRC_TEMPLATE.render(
         reduce_op=reduce_op,
+        reduction_identity=reduction_identity,
         prologue_code=prologue_code,
         epilogue_scalar_code=epilogue_scalar_code,
         read_vec_type=read_vec_type,

@@ -17,12 +17,12 @@ Frontend for vanilla attention module
 """
 from functools import partial
 
-from ...compiler import ops
-from .. import Tensor
-from .dropout import Dropout
-from .linear import Linear
-from .module import Module
-from .parameter import Parameter
+from aitemplate.compiler import ops
+from aitemplate.frontend import Tensor
+from aitemplate.frontend.nn.dropout import Dropout
+from aitemplate.frontend.nn.linear import Linear
+from aitemplate.frontend.nn.module import Module
+from aitemplate.frontend.nn.parameter import Parameter
 
 # pylint: disable=C0103
 
@@ -97,7 +97,7 @@ class VanillaMultiheadAttention(Module):
     where :math:`head_i = \text{Attention}(QW_i^Q, KW_i^K, VW_i^V)`.
 
     Args:
-        dim: toal dimension of the model
+        dim: total dimension of the model
         batch_size: batch size
         seq_len: sequence length
         num_heads: Number of parallel attention heads. Default: 8
@@ -212,7 +212,7 @@ class VanillaCrossAttention(Module):
     where :math:`head_i = \text{Attention}(QW_i^Q, KW_i^K, VW_i^V)`.
 
     Args:
-        dim: toal dimension of the model
+        dim: total dimension of the model
         batch_size: batch size
         seq_len: sequence length
         num_heads: Number of parallel attention heads. Default: 8

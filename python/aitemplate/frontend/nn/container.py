@@ -29,10 +29,10 @@ from typing import (
     Union,
 )
 
-from ...compiler.base import Tensor
+from aitemplate.compiler.base import Tensor
 
-from .module import Module, typename
-from .parameter import Parameter
+from aitemplate.frontend.nn.module import Module, typename
+from aitemplate.frontend.nn.parameter import Parameter
 
 __all__ = ["Sequential", "ModuleList", "ModuleDict", "ParameterList", "ParameterDict"]
 
@@ -87,12 +87,10 @@ class Sequential(Module):
     _modules: Dict[str, Module]  # type: ignore[assignment]
 
     @overload
-    def __init__(self, *args: Module) -> None:
-        ...
+    def __init__(self, *args: Module) -> None: ...
 
     @overload
-    def __init__(self, arg: "OrderedDict[str, Module]") -> None:
-        ...
+    def __init__(self, arg: "OrderedDict[str, Module]") -> None: ...
 
     def __init__(self, *args):
         super(Sequential, self).__init__()
@@ -131,7 +129,7 @@ class Sequential(Module):
             delattr(self, key)
         # To preserve numbering
         str_indices = [str(i) for i in range(len(self._modules))]
-        self._modules = OrderedDict(list(zip(str_indices, self._modules.values())))
+        self._modules = OrderedDict(zip(str_indices, self._modules.values()))
 
     def __len__(self) -> int:
         return len(self._modules)
@@ -309,7 +307,7 @@ class ModuleList(Module):
             delattr(self, self._get_abs_string_index(idx))
         # To preserve numbering, self._modules is being reconstructed with modules after deletion
         str_indices = [str(i) for i in range(len(self._modules))]
-        self._modules = OrderedDict(list(zip(str_indices, self._modules.values())))
+        self._modules = OrderedDict(zip(str_indices, self._modules.values()))
 
     def __len__(self) -> int:
         return len(self._modules)
@@ -557,12 +555,10 @@ class ParameterList(Module):
         return str(idx)
 
     @overload
-    def __getitem__(self, idx: int) -> Any:
-        ...
+    def __getitem__(self, idx: int) -> Any: ...
 
     @overload
-    def __getitem__(self: T, idx: slice) -> T:
-        ...
+    def __getitem__(self: T, idx: slice) -> T: ...
 
     def __getitem__(self, idx):
         if isinstance(idx, slice):

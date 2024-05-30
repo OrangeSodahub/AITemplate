@@ -15,14 +15,28 @@
 """
 gemm rrr with bias
 """
-from ...base import IntImm, Tensor
-from ...tensor_accessor import TensorAccessor
-from . import gemm_rrr
+from aitemplate.compiler.base import IntImm, Tensor
+from aitemplate.compiler.ops.gemm_universal import gemm_rrr
+from aitemplate.compiler.tensor_accessor import TensorAccessor
 
 # pylint: disable=C0103,W0223,W0221,W0613
 
 
 class gemm_rrr_bias(gemm_rrr):
+    """GEMM Specialization: GEMM_RRR(A, B) + Bias
+    A[RowMajor], B[RowMajor], Bias[RowMajor], C[RowMajor]
+
+    This operator is equivalent to the following pytorch code:
+
+    .. highlight:: python
+    .. code-block:: python
+        A = torch.randn(M, K).cuda().half()
+        B = torch.randn(K, N).cuda().half()
+        Bias = torch.randn(N).cuda().half()
+
+        y = torch.nn.functional.linear(A, B.t(), bias=Bias)
+    """
+
     def __init__(self):
         super().__init__()
         self._attrs["op"] = "gemm_rrr_bias"
@@ -80,7 +94,7 @@ class gemm_rrr_bias(gemm_rrr):
         self._sanity_check(a, b)
         output_shape = self._infer_shapes(a, b, bias)
         self._extract_epilogue_alignment(output_shape)
-        output = Tensor(output_shape, src_ops={self})
+        output = Tensor(output_shape, src_ops={self}, dtype=a.dtype())
         self._attrs["outputs"] = [output]
         self._attrs["output_accessors"] = [TensorAccessor(output)]
         return output

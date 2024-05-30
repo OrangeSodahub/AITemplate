@@ -143,23 +143,6 @@ inline cudaError_t GetNumBlocks(
 }
 
 template <typename T>
-struct DefaultComputeType {
-  using type = T;
-};
-
-template <>
-struct DefaultComputeType<half> {
-  using type = float;
-};
-
-// #if CUDA_VERSION >= 11000
-// template<>
-// struct DefaultComputeType<nv_bfloat16> {
-//   using type = float;
-// };
-// #endif  // CUDA_VERSION >= 11000
-
-template <typename T>
 class HasCanPackAs {
   typedef char one;
   struct two {
@@ -244,7 +227,7 @@ struct DirectStore {
 
 template <typename T>
 inline __device__ void WelfordCombine(T val, T* mean, T* m2, T* count) {
-  // Use Welford Online algorithem to compute mean and variance
+  // Use Welford Online algorithm to compute mean and variance
   // For more details you can refer to:
   // https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
   *count += 1;
@@ -610,7 +593,7 @@ DispatchLayerNormWarpImplCols(
     return cudaErrorInvalidValue;
   }
 #define DEFINE_ONE_ELIF(thread_group_width)                                 \
-  else if (cols <= (thread_group_width)*pack_size) {                        \
+  else if (cols <= (thread_group_width) * pack_size) {                      \
     if (rows % 2 == 0) {                                                    \
       return DispatchLayerNormWarpImplPadding<                              \
           LOAD,                                                             \
@@ -639,7 +622,7 @@ DispatchLayerNormWarpImplCols(
   DEFINE_ONE_ELIF(32)
 #undef DEFINE_ONE_ELIF
 #define DEFINE_ONE_ELIF(max_col, min_col)                                 \
-  else if (cols <= (max_col)*kWarpSize) {                                 \
+  else if (cols <= (max_col) * kWarpSize) {                               \
     return DispatchLayerNormWarpImplPadding<                              \
         LOAD,                                                             \
         STORE,                                                            \
@@ -680,7 +663,7 @@ DispatchLayerNormWarpImplCols(
     return cudaErrorInvalidValue;
   }
 #define DEFINE_ONE_ELIF(thread_group_width)                                 \
-  else if (cols <= (thread_group_width)*pack_size) {                        \
+  else if (cols <= (thread_group_width) * pack_size) {                      \
     if (rows % 2 == 0) {                                                    \
       return DispatchLayerNormWarpImplPadding<                              \
           LOAD,                                                             \
@@ -708,17 +691,18 @@ DispatchLayerNormWarpImplCols(
   DEFINE_ONE_ELIF(16)
   DEFINE_ONE_ELIF(32)
 #undef DEFINE_ONE_ELIF
-#define DEFINE_ONE_ELIF(max_col, min_col)                                   \
-  else if ((cols <= (max_col)*kWarpSize) && (cols > (min_col)*kWarpSize)) { \
-    return DispatchLayerNormWarpImplPadding<                                \
-        LOAD,                                                               \
-        STORE,                                                              \
-        ComputeType,                                                        \
-        pack_size,                                                          \
-        max_col,                                                            \
-        min_col,                                                            \
-        kWarpSize,                                                          \
-        1>(stream, load, store, rows, cols, epsilon, mean, inv_variance);   \
+#define DEFINE_ONE_ELIF(max_col, min_col)                                  \
+  else if (                                                                \
+      (cols <= (max_col) * kWarpSize) && (cols > (min_col) * kWarpSize)) { \
+    return DispatchLayerNormWarpImplPadding<                               \
+        LOAD,                                                              \
+        STORE,                                                             \
+        ComputeType,                                                       \
+        pack_size,                                                         \
+        max_col,                                                           \
+        min_col,                                                           \
+        kWarpSize,                                                         \
+        1>(stream, load, store, rows, cols, epsilon, mean, inv_variance);  \
   }
   DEFINE_ONE_ELIF(4, 2)
   DEFINE_ONE_ELIF(8, 4)
@@ -1535,47 +1519,47 @@ DispatchLayerNormGradWarpImplCols(
   if (cols <= 0) {
     return cudaErrorInvalidValue;
   }
-#define DEFINE_ONE_ELIF(thread_group_width)          \
-  else if (cols <= (thread_group_width)*pack_size) { \
-    if (rows % 2 == 0) {                             \
-      return DispatchLayerNormGradWarpImplPadding<   \
-          LOAD_X,                                    \
-          LOAD_SCALED_DY,                            \
-          STORE,                                     \
-          ComputeType,                               \
-          pack_size,                                 \
-          pack_size,                                 \
-          0,                                         \
-          thread_group_width,                        \
-          2>(                                        \
-          stream,                                    \
-          load_x,                                    \
-          load_scaled_dy,                            \
-          store,                                     \
-          mean,                                      \
-          inv_variance,                              \
-          rows,                                      \
-          cols);                                     \
-    } else {                                         \
-      return DispatchLayerNormGradWarpImplPadding<   \
-          LOAD_X,                                    \
-          LOAD_SCALED_DY,                            \
-          STORE,                                     \
-          ComputeType,                               \
-          pack_size,                                 \
-          pack_size,                                 \
-          0,                                         \
-          thread_group_width,                        \
-          1>(                                        \
-          stream,                                    \
-          load_x,                                    \
-          load_scaled_dy,                            \
-          store,                                     \
-          mean,                                      \
-          inv_variance,                              \
-          rows,                                      \
-          cols);                                     \
-    }                                                \
+#define DEFINE_ONE_ELIF(thread_group_width)            \
+  else if (cols <= (thread_group_width) * pack_size) { \
+    if (rows % 2 == 0) {                               \
+      return DispatchLayerNormGradWarpImplPadding<     \
+          LOAD_X,                                      \
+          LOAD_SCALED_DY,                              \
+          STORE,                                       \
+          ComputeType,                                 \
+          pack_size,                                   \
+          pack_size,                                   \
+          0,                                           \
+          thread_group_width,                          \
+          2>(                                          \
+          stream,                                      \
+          load_x,                                      \
+          load_scaled_dy,                              \
+          store,                                       \
+          mean,                                        \
+          inv_variance,                                \
+          rows,                                        \
+          cols);                                       \
+    } else {                                           \
+      return DispatchLayerNormGradWarpImplPadding<     \
+          LOAD_X,                                      \
+          LOAD_SCALED_DY,                              \
+          STORE,                                       \
+          ComputeType,                                 \
+          pack_size,                                   \
+          pack_size,                                   \
+          0,                                           \
+          thread_group_width,                          \
+          1>(                                          \
+          stream,                                      \
+          load_x,                                      \
+          load_scaled_dy,                              \
+          store,                                       \
+          mean,                                        \
+          inv_variance,                                \
+          rows,                                        \
+          cols);                                       \
+    }                                                  \
   }
   DEFINE_ONE_ELIF(4)
   DEFINE_ONE_ELIF(8)
@@ -1583,7 +1567,7 @@ DispatchLayerNormGradWarpImplCols(
   DEFINE_ONE_ELIF(32)
 #undef DEFINE_ONE_ELIF
 #define DEFINE_ONE_ELIF(max_col, min_col)        \
-  else if (cols <= (max_col)*kWarpSize) {        \
+  else if (cols <= (max_col) * kWarpSize) {      \
     return DispatchLayerNormGradWarpImplPadding< \
         LOAD_X,                                  \
         LOAD_SCALED_DY,                          \

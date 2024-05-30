@@ -17,8 +17,14 @@ CUDA reduce common functions
 """
 import jinja2
 
-from ....compiler.base import IntImm, IntVar
-from ...backend_spec import CUDASpec
+from aitemplate.backend.backend_spec import CUDASpec
+from aitemplate.backend.cuda.reduce.reduce_common_slim_tensor import (
+    get_special_exec_cond_and_kernel,
+    meets_special_kernel_conditions,
+)
+from aitemplate.backend.target import Target
+
+from aitemplate.compiler.base import IntImm, IntVar
 
 FUNC_DECL_TEMPLATE = jinja2.Template(
     """
@@ -62,6 +68,8 @@ SRC_TEMPLATE = jinja2.Template(
 #include "cutlass/layout/tensor.h"
 #include "cutlass/util/host_tensor.h"
 
+{{special_reduction_code}}
+
 #define CUTLASS_CHECK_REDUCE(status)                                                  \\
   {                                                                                   \\
     cutlass::Status error = status;                                                   \\
@@ -73,6 +81,7 @@ SRC_TEMPLATE = jinja2.Template(
     }                                                                                 \\
   }
 
+#ifndef SKIP_GENERAL_REDUCTION
 template <typename ElemOutputType, typename ElemInputType, int VectorLength = 1>
 void {{func_name}}_launcher(
     ElemOutputType *dst_ptr,
@@ -87,7 +96,7 @@ void {{func_name}}_launcher(
   using Layout = cutlass::layout::TensorNHWC;
   // Match pytorch's behavior where the accumuation type is the same
   // as the output type
-  using ElementCompute = ElemOutputType;
+  using ElementCompute = {{accumulation_type}};
   using ReductionOp = {{reduction_op}}<ElementCompute>;
   constexpr int NUM_DIMS = 4;
   assert(rank <= NUM_DIMS);
@@ -125,7 +134,7 @@ void {{func_name}}_launcher(
     src_dims[0], src_dims[1], src_dims[2], src_dims[3]
   );
   Layout src_layout(Layout::packed(src_extent));
-  ElementCompute reduction_identity = ElementCompute();
+  ElementCompute reduction_identity = {{reduction_identity}};
   TensorReduction reduction(src_extent, reduction_axis);
   ReductionOp reduction_op = ReductionOp();
   assert(dst_ptr);
@@ -140,7 +149,11 @@ void {{func_name}}_launcher(
     );
   CUTLASS_CHECK_REDUCE(status);
 }
+#else
+#undef SKIP_GENERAL_REDUCTION
+#endif // !SKIP_GENERAL_REDUCTION
 #undef CUTLASS_CHECK_REDUCE
+
 void {{func_name}}(
     void *dst_ptr,
     void *src_ptr,
@@ -187,14 +200,17 @@ def gen_function_decl(func_attrs):
     )
 
 
-def gen_function(func_attrs, reduction_op):
+def gen_function(
+    func_attrs,
+    reduction_op,
+    reduction_identity="ElementCompute()",
+):
     backend_spec = CUDASpec()
     elem_input_type = backend_spec.dtype_to_lib_type(
         func_attrs["inputs"][0]._attrs["dtype"]
     )
-    elem_output_type = backend_spec.dtype_to_lib_type(
-        func_attrs["outputs"][0]._attrs["dtype"]
-    )
+    output_type = func_attrs["outputs"][0]._attrs["dtype"]
+    elem_output_type = backend_spec.dtype_to_lib_type(output_type)
 
     vector_lens_config = [32, 16, 8, 4, 1]
     exec_paths = ""
@@ -212,11 +228,32 @@ def gen_function(func_attrs, reduction_op):
         workspace_ptr = "workspace"
     else:
         workspace_ptr = "nullptr"
+
+    accumulation_type = "float"
+    if Target.current()._kwargs.get("use_fp16_acc", False) and output_type == "float16":
+        accumulation_type = elem_output_type
+
+    # If conditions are met, replace exec_paths and include the special reduction code.
+    special_reduction_code = ""
+    if meets_special_kernel_conditions(func_attrs, elem_input_type, elem_output_type):
+        exec_paths, special_reduction_code = get_special_exec_cond_and_kernel(
+            func_attrs,
+            elem_input_type,
+            elem_output_type,
+            accumulation_type,
+            func_attrs["output_accessors"],
+            reduction_op,
+            reduction_identity,
+        )
+
     return SRC_TEMPLATE.render(
         func_name=func_attrs["name"],
         reduction_op=reduction_op,
+        reduction_identity=reduction_identity,
         exec_paths=exec_paths,
         workspace_ptr=workspace_ptr,
+        accumulation_type=accumulation_type,
+        special_reduction_code=special_reduction_code,
     )
 
 

@@ -61,3 +61,9 @@ class FuncEnum(Enum):
     GELU = 23
     FASTGELU = 24
     SOFTPLUS = 25
+    ELU = 26
+    SOFTSIGN = 27
+    FLOOR_DIV = 28
+    CELU = 29
+    FLOOR = 30
+    LOG1P = 31

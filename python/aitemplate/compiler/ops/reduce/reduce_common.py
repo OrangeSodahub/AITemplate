@@ -16,18 +16,22 @@
 Base operator definition for reduce-family ops.
 """
 import itertools
+import logging
 
 from typing import List
 
-from .... import backend
-from ....backend import registry
-from ....utils import logger, shape_utils
-from ....utils.tensor_utils import wrap_dim
-from ...base import IntImm, IntVar, Operator, Tensor
-from ...dtype import get_dtype_size
-from ...tensor_accessor import TensorAccessor
+from aitemplate import backend
+from aitemplate.backend import registry
+from aitemplate.compiler.base import IntImm, IntVar, Operator, Tensor
+from aitemplate.compiler.dtype import get_dtype_size
+from aitemplate.compiler.tensor_accessor import TensorAccessor
+from aitemplate.utils import shape_utils
+from aitemplate.utils.tensor_utils import wrap_dim
 
 # pylint: disable=C0103,W0221
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class reduce_base(Operator):
@@ -89,7 +93,11 @@ class reduce_base(Operator):
         return output_dims
 
     def _compute_ws_size_strided(
-        self, extent, reduction_axis, vector_length, dtype
+        self,
+        extent: List[int],
+        reduction_axis: int,
+        vector_length: int,
+        accumulation_type: str,
     ) -> int:
         """
         Compute workspace size for contiguous reduction kernels.
@@ -133,12 +141,15 @@ class reduce_base(Operator):
             cta_count_z = (inner_count + threadblock_shape_z - 1) // threadblock_shape_z
         if int(cta_count_z) == 1:
             return 0
-        vector_size_bytes = vector_length * get_dtype_size(dtype)
+        vector_size_bytes = vector_length * get_dtype_size(accumulation_type)
         workspace_stride = extent[k_rank - 1] * vector_size_bytes
         return workspace_stride * outer_count * cta_count_z
 
     def _compute_workspace_size(
-        self, shape: List[IntVar], reduction_axis, dtype
+        self,
+        shape: List[IntVar],
+        reduction_axis: int,
+        input_type: str,
     ) -> int:
         """
         Compute workspace size for the given shape using the same algorithm as
@@ -146,6 +157,20 @@ class reduce_base(Operator):
         the maximum dim value for dynamic dimension, whereas TensorReduction
         uses the real dim value at runtime.
         """
+        # workspace size must be computed in terms of the accumulation dtype;
+        # see the CUTLASS code in TensorReductionAffineStrided for the reference:
+        # https://github.com/NVIDIA/cutlass/blob/ff02da266713bd3365aed65c552412e126c040cb/include/cutlass/reduction/device/tensor_reduce_affine_strided.h#L223
+        accumulation_type = "float32"
+        try:
+            if (
+                backend.target.Target.current()._kwargs.get("use_fp16_acc", False)
+                and input_type == "float16"
+            ):
+                accumulation_type = input_type
+        except RuntimeError:
+            # Target is not set: conservatively
+            # assume float32 accumulation type
+            pass
         # Make sure the last dim is static to pre-compute vector_length.
         # Note that this is a temporary constraint. Once we replace TensorReduction
         # with our own col-reduction kernel, we will remove this entire workaround.
@@ -208,7 +233,10 @@ class reduce_base(Operator):
             max_ws = max(
                 max_ws,
                 self._compute_ws_size_strided(
-                    extent_affine, reduction_axis, vector_length, dtype
+                    extent_affine,
+                    reduction_axis,
+                    vector_length,
+                    accumulation_type,
                 ),
             )
         return max_ws
@@ -249,11 +277,13 @@ class reduce_base(Operator):
         # Note that this is a temprary solution only for col-reduction reduce_sum
         # kernels that invoke cutlass's TensorReduction kernel. Once we have our
         # own implementation, we will remove the workaround.
-        if self._attrs["op"] == "reduce_sum" and (reduction_axes[0] != input_rank - 1):
+        if self._attrs["op"] in ("reduce_sum", "reduce_min", "reduce_max") and (
+            self._attrs["reduction_axes"][0] != input_rank - 1
+        ):
             ws_size = self._compute_workspace_size(
-                x._attrs["shape"], reduction_axes[0], x.dtype()
+                x._attrs["shape"], self._attrs["reduction_axes"][0], x.dtype()
             )
-            logger.info(__name__, f'allocating {ws_size} for tensor {x._attrs["name"]}')
+            _LOGGER.info(f'allocating {ws_size} for tensor {x._attrs["name"]}')
             self._attrs["workspace"] = ws_size
         return output
 

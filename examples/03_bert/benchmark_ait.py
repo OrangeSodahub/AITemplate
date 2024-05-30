@@ -13,7 +13,6 @@
 #  limitations under the License.
 #
 import os
-from collections import OrderedDict
 
 from typing import Dict, List
 
@@ -25,8 +24,8 @@ from aitemplate.compiler import compile_model, Model
 from aitemplate.frontend import Tensor
 from aitemplate.testing import detect_target
 
-from modeling.bert import BertBaseEncodersOnly, BertBaseUncased
-from modeling.torch_model import BertBaseUncased as BertPt
+from .modeling.bert import BertBaseEncodersOnly, BertBaseUncased
+from .modeling.torch_model import BertBaseUncased as BertPt
 
 
 def mark_output(y: Tensor) -> None:
@@ -100,7 +99,7 @@ def map_pt_params(
     ait_bert, pt_bert, batch_size: int, seq_length: int
 ) -> Dict[str, torch.Tensor]:
     pt_params = dict(pt_bert.named_parameters())
-    mapped_pt_params = OrderedDict()
+    mapped_pt_params = {}
     for name, _ in ait_bert.named_parameters():
         ait_name = name.replace(".", "_")
         if name in pt_params:
@@ -209,8 +208,8 @@ def compile_module(
 
     mod = compile_model(y, target, "./tmp", model_name)
 
-    for k, v in params.items():
-        mod.set_constant_with_tensor(k, v)
+    mod.set_many_constants_with_tensors(params)
+    mod.fold_constants(sync=True)
 
     return mod
 

@@ -24,10 +24,11 @@ import bisect
 
 import jinja2
 
-from ...backend_spec import CUDASpec
-from ...common import tensor_accessor_codegen
+from aitemplate.backend.backend_spec import CUDASpec
+from aitemplate.backend.common import tensor_accessor_codegen
 
-from . import reduce_small_axis
+from aitemplate.backend.cuda.reduce import reduce_small_axis
+from aitemplate.backend.target import Target
 
 
 DEFAULT_PROLOGUE_TEMPLATE = jinja2.Template(
@@ -192,6 +193,7 @@ KERNEL_SRC_TEMPLATE = jinja2.Template(
 #include "cutlass/matrix_shape.h"
 #include "cutlass/numeric_conversion.h"
 #include "cutlass/tensor_ref.h"
+#include "cutlass/fast_math.h"
 
 #ifndef CHECK_ERROR_REDUCE
 #define CHECK_ERROR_REDUCE(expr)                             \\
@@ -272,7 +274,7 @@ struct ReductionKernel3D {
   };
 
   struct SharedStorage {
-    cutlass::AlignedArray<ElementCompute, Shape::kCount> exchange;
+    cutlass::AlignedArray<ElementCompute, Shape::kCount, Shape::kCount * alignof(ElementCompute)> exchange;
   };
 
   CUTLASS_DEVICE
@@ -321,7 +323,17 @@ struct ReductionKernel3D {
     ReduceScalarOp reduce_s_op;
 
     FragmentCompute frag_compute;
+
+{% if reduction_identity == 'ElementCompute()' %}
+    // initialize the frag_compute with default values
     frag_compute.clear();
+{% else %}
+    // need to initialize the frag_compute with the specific
+    // reduction_identity values, as those are likely non-default
+    for (int i = 0; i < kAlignment; ++i) {
+      frag_compute[i] = {{reduction_identity}};
+    }
+{% endif %}
 
     if (idx_m < args.extent.row()) {
 
@@ -412,7 +424,7 @@ struct ReductionKernel3D {
     // Tree reduction
     ElementCompute *smem_ptr = shared_storage.exchange.data() + threadIdx.y * Shape::kColumn;
 
-    ElementCompute result = ElementCompute();
+    ElementCompute result = {{reduction_identity}};
 
     CUTLASS_PRAGMA_UNROLL
     for (
@@ -463,7 +475,7 @@ struct ReductionKernel3D {
 
       // Certain shape combinations require an additional reduction step
       if (kLgResidual) {
-        result = ElementCompute();
+        result = {{reduction_identity}};
 
         int const kResidualVector = (1 << kLgResidual);
         cutlass::Array<ElementCompute, kResidualVector> fetch;
@@ -798,6 +810,7 @@ def gen_function(
     epilogue_scalar_template=DEFAULT_EPILOGUE_SCALAR_TEMPLATE,
     extra_code_str="",
     accumulation_type=None,
+    reduction_identity="ElementCompute()",
 ) -> str:
     """a common function for generating a reduce-family kernel
 
@@ -829,7 +842,13 @@ def gen_function(
     output_type = backend_spec.dtype_to_lib_type(y._attrs["dtype"])
     if accumulation_type is None:
         # follow pytorch's semantics
-        acc_type = output_type
+        if (
+            Target.current()._kwargs.get("use_fp16_acc", False)
+            and y._attrs["dtype"] == "float16"
+        ):
+            acc_type = output_type
+        else:
+            acc_type = "float"
     else:
         acc_type = accumulation_type
 
@@ -858,7 +877,9 @@ def gen_function(
 
     # FIXME: these alignments values are only for half_t type.
     # make it adjustable to other types such as float.
-    alignments = [16, 8, 4, 2, 1]
+    alignments = [8, 4, 2, 1]
+    if x._attrs["dtype"] in ("float16", "bfloat16"):
+        alignments.append(16)
     # This is ugly. Ideally, we should have templated code like below:
     # template <typename Alignment>
     # reduce_launcher(...) {
@@ -902,8 +923,9 @@ def gen_function(
     assert (
         len(output_accessors) == 1
     ), f"expected the length of output_accessors to be one but got {len(output_accessors)}"
+    dtype = func_attrs["inputs"][0].dtype()
     output_alignment = tensor_accessor_codegen.find_max_alignment_for_accessors(
-        output_accessors
+        dtype, output_accessors
     )
     special_exec_path, special_kernel = reduce_small_axis.get_exec_cond_and_kernel(
         func_attrs,
@@ -916,6 +938,7 @@ def gen_function(
         acc_type,
         output_accessors,
         output_alignment,
+        reduction_identity,
     )
     exec_paths = EXEC_COND_TEMPLATE.render(
         indent="  ",
@@ -939,6 +962,7 @@ def gen_function(
     kernel_src = KERNEL_SRC_TEMPLATE.render(
         extra_code=extra_code_str,
         reduce_op=reduce_op,
+        reduction_identity=reduction_identity,
         reduce_kernel_instance=reduce_instance,
         alignments=alignments,
         prologue_code=prologue_code,

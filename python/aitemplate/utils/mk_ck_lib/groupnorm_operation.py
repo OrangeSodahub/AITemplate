@@ -19,7 +19,7 @@ import jinja2
 
 # import library
 
-from . import library
+from aitemplate.utils.mk_ck_lib import library
 
 
 @dataclass
@@ -78,7 +78,7 @@ class GroupNormOperation:
     def emit(self) -> str:
         template = jinja2.Template(
             """
-using {{name}} = ck::tensor_operation::device::DeviceLayernormImpl<
+using {{name}} = ck::tensor_operation::device::DeviceNormalizationImpl<
     {{InDType}},
     {{InDType}},
     {{InDType}},

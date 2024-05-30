@@ -19,13 +19,13 @@ This is used for `ops.bmm_rcr`.
 """
 import jinja2
 
-from ... import registry
-from . import bmm_common, common
-from .layout import RCR
+from aitemplate.backend import registry
+from aitemplate.backend.rocm.gemm import bmm_common, common
+from aitemplate.backend.rocm.gemm.layout import RCR
 
 EXTRA_CODE = jinja2.Template(
     """
-#include "data_type.hpp"
+#include "ck/utility/data_type.hpp"
 
 const ck::half_t alpha = {{scale}};
 
@@ -71,7 +71,7 @@ EXTRA_SHAPE_TEMPLATE = jinja2.Template(
 
 EXTRA_HEADER_TEMPLATE = jinja2.Template(
     """
-#include "ck/tensor_operation/gpu/device/device_batched_gemm_softmax_gemm_xdl_cshuffle.hpp"
+#include "ck/tensor_operation/gpu/device/impl/device_batched_gemm_softmax_gemm_xdl_cshuffle.hpp"
 """
 )
 
